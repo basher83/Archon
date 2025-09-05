@@ -75,7 +75,7 @@ class MCPClient:
 
             # Make HTTP request to MCP server
             response = await self.client.post(
-                f"{self.mcp_url}/rpc",
+                f"{self.mcp_url}/mcp",
                 json=request_data,
                 headers={"Content-Type": "application/json"},
             )

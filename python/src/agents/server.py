@@ -26,6 +26,7 @@ from pydantic import BaseModel
 # Import our PydanticAI agents
 from .document_agent import DocumentAgent
 from .rag_agent import RagAgent
+from .task_agent import TaskAgent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +56,7 @@ class AgentResponse(BaseModel):
 AVAILABLE_AGENTS = {
     "document": DocumentAgent,
     "rag": RagAgent,
+    "task": TaskAgent,
 }
 
 # Global credentials storage
@@ -173,12 +175,35 @@ async def run_agent(request: AgentRequest):
 
         agent = app.state.agents[request.agent_type]
 
-        # Prepare dependencies for the agent
-        deps = {
-            "context": request.context or {},
-            "options": request.options or {},
-            "mcp_endpoint": os.getenv("MCP_SERVICE_URL", "http://archon-mcp:8051"),
-        }
+        # Prepare dependencies based on agent type (same as streaming endpoint)
+        if request.agent_type == "rag":
+            from .rag_agent import RagDependencies
+
+            deps = RagDependencies(
+                source_filter=request.context.get("source_filter") if request.context else None,
+                match_count=request.context.get("match_count", 5) if request.context else 5,
+                project_id=request.context.get("project_id") if request.context else None,
+            )
+        elif request.agent_type == "document":
+            from .document_agent import DocumentDependencies
+
+            deps = DocumentDependencies(
+                project_id=request.context.get("project_id") if request.context else "",
+                user_id=request.context.get("user_id") if request.context else None,
+            )
+        elif request.agent_type == "task":
+            from .task_agent import TaskDependencies
+
+            deps = TaskDependencies(
+                project_id=request.context.get("project_id") if request.context else None,
+                user_id=request.context.get("user_id") if request.context else None,
+                current_task_id=request.context.get("current_task_id") if request.context else None,
+            )
+        else:
+            # Default dependencies
+            from .base_agent import ArchonDependencies
+
+            deps = ArchonDependencies()
 
         # Run the agent
         result = await agent.run(request.prompt, deps)
@@ -242,6 +267,14 @@ async def stream_agent(agent_type: str, request: AgentRequest):
                 deps = DocumentDependencies(
                     project_id=request.context.get("project_id") if request.context else None,
                     user_id=request.context.get("user_id") if request.context else None,
+                )
+            elif agent_type == "task":
+                from .task_agent import TaskDependencies
+
+                deps = TaskDependencies(
+                    project_id=request.context.get("project_id") if request.context else None,
+                    user_id=request.context.get("user_id") if request.context else None,
+                    current_task_id=request.context.get("current_task_id") if request.context else None,
                 )
             else:
                 # Default dependencies

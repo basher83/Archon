@@ -20,6 +20,7 @@ COPY src/__init__.py src/
 # Set environment variables
 ENV PYTHONPATH="/app:$PYTHONPATH"
 ENV PYTHONUNBUFFERED=1
+ENV DOCKER_CONTAINER=1
 
 # Expose Agents port
 ARG ARCHON_AGENTS_PORT=8052

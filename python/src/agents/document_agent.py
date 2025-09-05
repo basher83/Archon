@@ -49,7 +49,7 @@ class DocumentOperation(BaseModel):
     )
 
 
-class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
+class DocumentAgent(BaseAgent[DocumentDependencies, str]):
     """
     Conversational agent for document management.
 
@@ -76,7 +76,6 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
         agent = Agent(
             model=self.model,
             deps_type=DocumentDependencies,
-            result_type=DocumentOperation,
             system_prompt="""You are a Document Management Assistant that helps users create, update, and modify project documents through conversation.
 
 **Your Capabilities:**
@@ -147,18 +146,18 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
                 if not ctx.deps.project_id:
                     return "No project is currently selected. Please specify a project or create one first to manage documents."
 
-                supabase = get_supabase_client()
-                response = (
-                    supabase.table("archon_projects")
-                    .select("docs")
-                    .eq("id", ctx.deps.project_id)
-                    .execute()
+                # Use MCP to list documents
+                mcp_client = await get_mcp_client()
+                result_json = await mcp_client.manage_document(
+                    action="list",
+                    project_id=ctx.deps.project_id
                 )
-
-                if not response.data:
-                    return "No project found with the given ID."
-
-                docs = response.data[0].get("docs", [])
+                
+                result_data = json.loads(result_json)
+                if not result_data.get("success", False):
+                    return f"Error listing documents: {result_data.get('error', 'Unknown error')}"
+                
+                docs = result_data.get("documents", [])
                 if not docs:
                     return "No documents found in this project."
 
@@ -178,18 +177,18 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
         async def get_document(ctx: RunContext[DocumentDependencies], document_title: str) -> str:
             """Get the content of a specific document by title."""
             try:
-                supabase = get_supabase_client()
-                response = (
-                    supabase.table("archon_projects")
-                    .select("docs")
-                    .eq("id", ctx.deps.project_id)
-                    .execute()
+                # First list documents to find matching title
+                mcp_client = await get_mcp_client()
+                list_result_json = await mcp_client.manage_document(
+                    action="list",
+                    project_id=ctx.deps.project_id
                 )
-
-                if not response.data:
-                    return "No project found."
-
-                docs = response.data[0].get("docs", [])
+                
+                list_result = json.loads(list_result_json)
+                if not list_result.get("success", False):
+                    return "Error retrieving project documents."
+                
+                docs = list_result.get("documents", [])
                 matching_docs = [
                     doc for doc in docs if document_title.lower() in doc.get("title", "").lower()
                 ]
@@ -198,8 +197,22 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
                     available_docs = [doc.get("title", "Untitled") for doc in docs[:5]]
                     return f"No document found matching '{document_title}'. Available documents: {', '.join(available_docs)}"
 
+                # Get the full document content
                 doc = matching_docs[0]
-                content = doc.get("content", {})
+                doc_id = doc.get("id")
+                
+                get_result_json = await mcp_client.manage_document(
+                    action="get",
+                    project_id=ctx.deps.project_id,
+                    doc_id=doc_id
+                )
+                
+                get_result = json.loads(get_result_json)
+                if not get_result.get("success", False):
+                    return f"Error retrieving document: {get_result.get('error', 'Unknown error')}"
+                
+                doc_detail = get_result.get("document", {})
+                content = doc_detail.get("content", {})
 
                 # Format content for display
                 content_str = ""
@@ -218,7 +231,7 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
                 else:
                     content_str = str(content)
 
-                return f"**Document: {doc.get('title', 'Untitled')}**\nType: {doc.get('document_type', 'unknown')}\nStatus: {doc.get('status', 'draft')}\nVersion: {doc.get('version', '1.0')}\n{content_str}"
+                return f"**Document: {doc_detail.get('title', 'Untitled')}**\nType: {doc_detail.get('document_type', 'unknown')}\nAuthor: {doc_detail.get('author', 'Unknown')}\nCreated: {doc_detail.get('created_at', 'Unknown')}\n{content_str}"
 
             except Exception as e:
                 logger.error(f"Error getting document: {e}")
@@ -246,11 +259,10 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
                 # Create the document content in the expected format
                 content = {"id": str(uuid.uuid4()), "title": title, "blocks": blocks}
 
-                # Create document via DocumentService
-                from ..services.projects.document_service import DocumentService
-
-                doc_service = DocumentService()
-                success, result_data = doc_service.add_document(
+                # Create document via MCP
+                mcp_client = await get_mcp_client()
+                result_json = await mcp_client.manage_document(
+                    action="create",
                     project_id=ctx.deps.project_id,
                     document_type=document_type,
                     title=title,
@@ -258,6 +270,8 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
                     tags=[document_type, "conversational"],
                     author=ctx.deps.user_id or "DocumentAgent",
                 )
+                
+                result_data = json.loads(result_json)
 
                 if result_data.get("success", False):
                     doc_id = result_data.get("document_id", "unknown")
@@ -794,18 +808,8 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
 
     def get_system_prompt(self) -> str:
         """Get the base system prompt for this agent."""
-        try:
-            from ..services.prompt_service import prompt_service
-
-            # For now, use document_builder as default
-            # In future, could make this configurable based on operation type
-            return prompt_service.get_prompt(
-                "document_builder",
-                default="Document Management Assistant for conversational document operations.",
-            )
-        except Exception as e:
-            logger.warning(f"Could not load prompt from service: {e}")
-            return "Document Management Assistant for conversational document operations."
+        # Return default prompt since we can't access server services from agents container
+        return "Document Management Assistant for conversational document operations."
 
     async def run_conversation(
         self,
@@ -814,7 +818,7 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
         user_id: str = None,
         current_document_id: str = None,
         progress_callback: Any = None,
-    ) -> DocumentOperation:
+    ) -> str:
         """
         Run the agent for conversational document management.
 
@@ -826,7 +830,7 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
             progress_callback: Optional callback for progress updates
 
         Returns:
-            Structured DocumentOperation result
+            String response from the agent
         """
         deps = DocumentDependencies(
             project_id=project_id,
@@ -837,21 +841,11 @@ class DocumentAgent(BaseAgent[DocumentDependencies, DocumentOperation]):
 
         try:
             result = await self.run(user_message, deps)
-            self.logger.info(f"Document operation completed: {result.operation_type}")
+            self.logger.info(f"Document operation completed successfully")
             return result
         except Exception as e:
             self.logger.error(f"Document operation failed: {str(e)}")
-            # Return error result
-            return DocumentOperation(
-                operation_type="error",
-                document_id=None,
-                document_type=None,
-                title=None,
-                success=False,
-                message=f"Failed to process request: {str(e)}",
-                changes_made=[],
-                content_preview=None,
-            )
+            return f"Error: Failed to process request - {str(e)}"
 
 
 # Note: DocumentAgent instances should be created on-demand in API endpoints
