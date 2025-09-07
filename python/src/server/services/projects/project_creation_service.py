@@ -151,13 +151,8 @@ class ProjectCreationService:
                 # No LLM provider configured, skip AI documentation
                 return False
 
-            # Import DocumentAgent (lazy import to avoid startup issues)
-            from ...agents.document_agent import DocumentAgent
-
-
-
-            # Initialize DocumentAgent
-            document_agent = DocumentAgent()
+            # Use HTTP client to call document agent (agents run in separate container)
+            from ..agents_service_client import agents_client
 
             # Generate comprehensive PRD using conversation
             prd_request = f"Create a PRD document titled '{title} - Product Requirements Document' for a project called '{title}'"
@@ -166,22 +161,17 @@ class ProjectCreationService:
             if github_repo:
                 prd_request += f" (GitHub repo: {github_repo})"
 
-            # Create a progress callback for the document agent
-            async def agent_progress_callback(update_data):
-                pass  # Progress tracking removed
-
-            # Run the document agent to create PRD
-            agent_result = await document_agent.run_conversation(
-                user_message=prd_request,
+            # Call the document agent via HTTP
+            agent_result = await agents_client.call_document_agent(
+                prompt=prd_request,
                 project_id=project_id,
                 user_id="system",
-                progress_callback=agent_progress_callback,
             )
 
-            if agent_result.success:
-
+            if agent_result.get("success", False):
                 return True
             else:
+                logger.warning(f"Document agent failed: {agent_result.get('error', 'Unknown error')}")
                 return False
 
         except Exception as ai_error:
